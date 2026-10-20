@@ -464,6 +464,9 @@ class LogitsProcessor(nn.Module):
         self.use_fp32_lm_head = get_exec().features.enable_fp32_lm_head or getattr(
             config, "enable_lm_head_fp32", False
         )
+        self.use_fp32_lm_head_output = getattr(
+            config, "enable_lm_head_output_fp32", False
+        )
         if self.use_attn_tp_group:
             self.attn_tp_size = get_parallel().attn_tp_size
             self.do_tensor_parallel_all_gather = (
@@ -1070,26 +1073,26 @@ class LogitsProcessor(nn.Module):
             logits = quant_method.apply(lm_head, hidden_states, embedding_bias)
         elif hasattr(lm_head, "weight"):
             # Normal linear layer
-            if self.use_fp32_lm_head:
-                # Avoid materializing FP32 copies for same-dtype CUDA FP16/BF16
-                # inputs. Retain explicit FP32 casts for unsupported devices or
-                # dtype combinations.
-                use_mm_out_dtype = (
-                    hidden_states.is_cuda
-                    and hidden_states.dtype == lm_head.weight.dtype
-                    and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            if (
+                (self.use_fp32_lm_head or self.use_fp32_lm_head_output)
+                and hidden_states.is_cuda
+                and hidden_states.dtype == lm_head.weight.dtype
+                and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            ):
+                # Keep low-precision operands and avoid rounding the projection
+                # output before it reaches the FP32 sampler buffer.
+                logits = torch.mm(
+                    hidden_states,
+                    lm_head.weight.T,
+                    out_dtype=torch.float32,
                 )
-                if use_mm_out_dtype:
-                    logits = torch.mm(
-                        hidden_states,
-                        lm_head.weight.T,
-                        out_dtype=torch.float32,
-                    )
-                else:
-                    logits = torch.matmul(
-                        hidden_states.to(torch.float32),
-                        lm_head.weight.to(torch.float32).T,
-                    )
+            elif self.use_fp32_lm_head:
+                # Only the explicit full-FP32 policy promotes operands when
+                # the backend cannot produce FP32 output from their dtype.
+                logits = torch.matmul(
+                    hidden_states.to(torch.float32),
+                    lm_head.weight.to(torch.float32).T,
+                )
             elif use_intel_amx_backend(lm_head):
                 logits = torch.ops.sgl_kernel.weight_packed_linear(
                     hidden_states.to(lm_head.weight.dtype),
