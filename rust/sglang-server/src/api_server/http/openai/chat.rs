@@ -238,6 +238,12 @@ async fn chat_completions(
         ),
         parser => starts_in_reasoning(parser, rendered.prompt.as_str()).then_some(true),
     };
+    // Python's `_reported_prompt_tokens`: K3's three-token generation stub is
+    // model input the reference API does not report.
+    let prompt_stub_tokens = match state.chat_formatter {
+        Some(ChatFormatter::KimiK3) => 3,
+        _ => 0,
+    };
     // As Python, the continued text decides whether generation starts in reasoning.
     let reasoning_options = ReasoningOptions {
         force_reasoning,
@@ -289,6 +295,7 @@ async fn chat_completions(
             parser,
             reasoning_parser,
             reasoning_options,
+            prompt_stub_tokens,
             tools,
             stream_tool_choice,
             uses_tool_call_structural_tag,
@@ -307,6 +314,7 @@ async fn chat_completions(
             parser,
             reasoning_parser,
             reasoning_options,
+            prompt_stub_tokens,
             tools,
             parallel_tool_calls,
             service_tier,
@@ -506,6 +514,7 @@ pub(super) async fn unary_chat(
     parser: Option<String>,
     reasoning_parser: Option<String>,
     reasoning_options: ReasoningOptions,
+    prompt_stub_tokens: u32,
     tools: Option<Vec<ToolDefinition>>,
     parallel_tool_calls: bool,
     service_tier: Option<ChatServiceTier>,
@@ -523,7 +532,7 @@ pub(super) async fn unary_chat(
         };
 
         if prompt_tokens == 0 {
-            prompt_tokens = output.prompt_tokens;
+            prompt_tokens = output.prompt_tokens.saturating_sub(prompt_stub_tokens);
         }
         completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
         let logprobs = want_logprobs.then(|| chat_logprobs(output.extras.as_deref()));
@@ -595,6 +604,7 @@ pub(super) fn chat_event_stream(
     parser: Option<String>,
     reasoning_parser: Option<String>,
     reasoning_options: ReasoningOptions,
+    prompt_stub_tokens: u32,
     tools: Option<Vec<ToolDefinition>>,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
     uses_tool_call_structural_tag: bool,
@@ -660,7 +670,7 @@ pub(super) fn chat_event_stream(
                 }
             };
             if prompt_tokens == 0 {
-                prompt_tokens = output.prompt_tokens;
+                prompt_tokens = output.prompt_tokens.saturating_sub(prompt_stub_tokens);
             }
             completion_tokens = completion_tokens.saturating_add(output.completion_tokens);
             let finish_reason = chat_finish_reason(&output);
@@ -1162,6 +1172,7 @@ mod tests {
             None,
             None,
             ReasoningOptions::default(),
+            3, // Kimi K3's generation stub
             None,
             true,
             None,
@@ -1175,7 +1186,10 @@ mod tests {
         assert_eq!(value["choices"][0]["message"]["role"], "assistant");
         assert_eq!(value["choices"][0]["message"]["content"], "Paris");
         assert_eq!(value["choices"][1]["index"], 1);
-        assert_eq!(value["usage"]["prompt_tokens"], 5);
+        assert_eq!(
+            value["usage"]["prompt_tokens"], 2,
+            "the stub is not reported"
+        );
         assert_eq!(value["usage"]["completion_tokens"], 2);
     }
 
@@ -1261,6 +1275,7 @@ mod tests {
             None,
             Some("deepseek-r1".into()),
             ReasoningOptions::default(),
+            0,
             None,
             true,
             None,
@@ -1300,6 +1315,7 @@ mod tests {
             None,
             Some("deepseek-r1".into()),
             ReasoningOptions::default(),
+            0,
             None,
             None,
             false,
@@ -1346,6 +1362,7 @@ mod tests {
             None,
             None,
             ReasoningOptions::default(),
+            0,
             None,
             None,
             false,
