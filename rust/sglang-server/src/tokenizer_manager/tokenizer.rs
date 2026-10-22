@@ -81,7 +81,12 @@ impl DynamoTokenizer {
             .and_then(|config| {
                 let bos = &config["bos_token"];
                 let bos = bos.as_str().or_else(|| bos["content"].as_str())?.to_owned();
-                // The last id: an auto-added BOS may precede it.
+                // Python's `convert_tokens_to_ids`. tiktoken has no vocab
+                // lookup, so it encodes the token as a special instead,
+                // taking the last id: an auto-added BOS may precede it.
+                if let Ok(Some(id)) = inner.token_to_id(&bos) {
+                    return Some(i64::from(id));
+                }
                 let ids = inner
                     .encode_segments(&[EncodeSegment::new(&bos, true)])
                     .ok()?;
@@ -475,6 +480,45 @@ mod tests {
             vec![2, 3],
             "chat and continuation lose it too"
         );
+    }
+
+    /// An HF tokenizer whose post-processor prepends `<s>`: the continuation
+    /// loses that BOS, which `tokenizer_config.json` names, as on Python.
+    #[test]
+    fn hf_continuation_drops_the_configured_bos() {
+        let dir = std::env::temp_dir().join(format!("bos-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tokenizer = serde_json::json!({
+            "added_tokens": [{"id": 0, "content": "<s>", "single_word": false, "lstrip": false,
+                "rstrip": false, "normalized": false, "special": true}],
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": {"type": "TemplateProcessing",
+                "single": [{"SpecialToken": {"id": "<s>", "type_id": 0}},
+                    {"Sequence": {"id": "A", "type_id": 0}}],
+                "pair": [{"Sequence": {"id": "A", "type_id": 0}}],
+                "special_tokens": {"<s>": {"id": "<s>", "ids": [0], "tokens": ["<s>"]}}},
+            "model": {"type": "WordLevel", "unk_token": "[UNK]",
+                "vocab": {"<s>": 0, "[UNK]": 1, "Hi": 2, "It": 3}},
+        });
+        let file = dir.join("tokenizer.json");
+        std::fs::write(&file, tokenizer.to_string()).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), r#"{"bos_token": "<s>"}"#).unwrap();
+        let path = file.to_str().unwrap();
+        let inner = load_tokenizer(Some(path), None, false).unwrap().unwrap();
+        let tokenizer = DynamoTokenizer::new(inner, path, None);
+        assert_eq!(tokenizer.bos_token_id(), Some(0));
+
+        let worker = TokenizerWorker::new(
+            flume::unbounded().1,
+            flume::unbounded().0,
+            Arc::new(tokenizer),
+        );
+        let chat = RenderedChat {
+            prompt: RenderedPrompt::text("Hi".into()),
+            continuation: "It".into(),
+        };
+        assert_eq!(worker.encode_chat(&chat).unwrap(), vec![2, 3]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A tokenize request is answered through its own sink and never returns
