@@ -904,6 +904,18 @@ def terminate_and_kill_process_tree(
     wait_for_gpu_release(pids)
 
 
+def _with_pd_mem_fraction(other_args):
+    """Apply SGLANG_TEST_PD_MEM_FRACTION_STATIC, if set, to a PD test server's arguments."""
+    args = [str(x) for x in other_args]
+    fraction = os.environ.get("SGLANG_TEST_PD_MEM_FRACTION_STATIC")
+    if not fraction:
+        return args
+    if "--mem-fraction-static" in args:
+        i = args.index("--mem-fraction-static")
+        del args[i : i + 2]
+    return args + ["--mem-fraction-static", fraction]
+
+
 def popen_launch_pd_server(
     model: str,
     base_url: str,
@@ -924,7 +936,7 @@ def popen_launch_pd_server(
         command,
         "--model-path",
         model,
-        *[str(x) for x in other_args],
+        *_with_pd_mem_fraction(other_args),
     ]
 
     command.extend(
