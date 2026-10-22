@@ -6,7 +6,7 @@ use dynamo_renderer::deepseek::v4::{self, ReasoningEffort, ThinkingMode};
 use serde::de::IgnoredAny;
 use serde_json::{Map, Value, json};
 
-use super::schema_types::normalize_json_schema_types;
+use crate::schema_types::normalize_json_schema_types;
 use crate::model_files::resolve_model_file;
 use crate::render::reasoning::{requested_effort, requested_thinking};
 
